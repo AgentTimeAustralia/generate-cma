@@ -1,20 +1,130 @@
-<!DOCTYPE html>
-<html lang="en">
+//Comparable Sales Button Widget
 
-<head>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <meta charset="UTF-8">
-    <title>CMA Report</title>
+"use strict";
 
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+require("dotenv").config();
+// adding what s recomeneded
+
+const catalyst = require("zcatalyst-sdk-node");
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
+module.exports = async (req, res) => {
+  const catalystApp = catalyst.initialize(req);
+
+  const datastore = catalystApp.datastore();
+
+  const usageTable = datastore.table("WidgetUsageLogs");
+  const creditsTable = datastore.table("CreditsBalance");
+  const htagConsumptionTable = datastore.table("HTAGConsumptionLogs");
+  const zcql = catalystApp.zcql();
+
+  // =============================================
+  // CORS
+  // =============================================
+
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, x-org-id, x-crm-user, x-record-id"
+  );
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(200);
+
+    res.end();
+
+    return;
+  }
+
+  let body = {};
+  const startTime = Date.now();
+
+  let usageBreakdown = [];
+
+  let totalBillingUnits = 0;
+
+  let totalBillingCost = 0;
+
+  let currentBillingBalance = null;
+
+  let creditRow = null;
+
+  let tenantRow = null;
+
+  let newBalance = 0;
+
+  try {
+    // =============================================
+    // AUTHENTICATION CHECK
+    // =============================================
+
+    const currentUser = await catalystApp.userManagement().getCurrentUser();
+
+    // console.log("AUTHENTICATED USER:", currentUser);
+
+    if (!currentUser || !currentUser.user_id) {
+      res.writeHead(401, {
+        "Content-Type": "application/json",
+      });
+
+      res.end(
+        JSON.stringify({
+          success: false,
+          message: "Unauthorized",
+        })
+      );
+
+      return;
+    }
+
+    // =============================================
+    // ORG DETAILS
+    // =============================================
+    // removing white space from org id id exist.
+    const orgId = String(req.headers["x-org-id"] || "").trim();
+    // console.log("ORG ID HEADER:", orgId);
+
+    // const crmUser = req.headers["x-crm-user"] || "Unknown User";
+    // =============================================
+    // FETCH CREDIT BALANCE
+    // =============================================
+
+    const creditResult = await zcql.executeZCQLQuery(
+      `SELECT * FROM CreditsBalance WHERE OrgID='${orgId}'`
+    );
+
+    // console.log("CREDIT RESULT:", JSON.stringify(creditResult, null, 2));
+
+    const apiTenantResult = await zcql.executeZCQLQuery(
+      `SELECT * FROM apiTenants WHERE Org_ID='${orgId}'`
+    );
+
+    const paymentHistoryResult = await zcql.executeZCQLQuery(
+      `SELECT * FROM PaymentHistory
+       WHERE OrgID='${orgId}'
+       ORDER BY LastTopupDate DESC`
+    );
+
+    let lastTopupDate = "";
+    let lastTopup = 0;
+    let totalCreditsPurchased = 0;
+    let latestPayment = null;
+
+    if (paymentHistoryResult && paymentHistoryResult.length > 0) {
+      paymentHistoryResult.forEach((row) => {
+        totalCreditsPurchased += Number(row.PaymentHistory.CreditToppedUp || 0);
+
+        if (
+          !latestPayment ||
+          new Date(row.PaymentHistory.LastTopupDate) >
+            new Date(latestPayment.LastTopupDate)
+        ) {
+          latestPayment = row.PaymentHistory;
         }
+      });
 
-<<<<<<< HEAD
       if (latestPayment) {
         lastTopupDate = latestPayment.LastTopupDate || "";
         lastTopup = Number(latestPayment.CreditToppedUp || 0);
@@ -35,6 +145,8 @@
     if (apiTenantResult && apiTenantResult.length > 0) {
       tenantRow = apiTenantResult[0].apiTenants;
     }
+
+    let currentCredits = Number(tenantRow?.CreditsLeft || 0);
 
     let latestPaymentGlobal = latestPayment;
 
@@ -74,16 +186,15 @@
         : null;
 
       if (
-        paymentLastTopup &&
-        (!tenantLastTopup || paymentLastTopup > tenantLastTopup)
+        !tenantLastTopup ||
+        paymentLastTopup > tenantLastTopup ||
+        Number(tenantRow.CreditsLeft || 0) <= 0
       ) {
         // console.log("NEW TOPUP DETECTED");
 
         const topupCredits = Number(latestPayment.CreditToppedUp || 0);
 
-        const currentCredits = Number(tenantRow.CreditsLeft || 0);
-
-        const newCredits = currentCredits + topupCredits;
+        const newCredits = topupCredits;
 
         // console.log("UPDATING APITENANTS =>", {
         //   creditsBefore: currentCredits,
@@ -94,9 +205,12 @@
 
         await zcql.executeZCQLQuery(`
           UPDATE apiTenants
-          SET CreditsLeft=${newCredits},
-              CreditStatus='Active',
-              LastTopUpDate='${latestPayment.LastTopupDate}'
+SET CreditsLeft=${newCredits},
+    CreditStatus='Active',
+    LastTopUpDate='${latestPayment.LastTopupDate}',
+    SubscriptionPlan='${latestPayment.SubscriptionPlan}',
+    SubscriptionStatus='${latestPayment.SubscriptionStatus}',
+    SubscriptionExpiryDate='${latestPayment.SubscriptionExpiryDate}'
           WHERE ROWID='${tenantRow.ROWID}'
           `);
 
@@ -105,6 +219,7 @@
         );
 
         tenantRow = refreshedTenant[0].apiTenants;
+        currentCredits = Number(tenantRow.CreditsLeft || 0);
 
         // console.log("TOPUP APPLIED:", topupCredits, "NEW BALANCE:", newCredits);
       }
@@ -114,7 +229,42 @@
       throw new Error("No apiTenants record found for Org ID: " + orgId);
     }
 
-    let currentCredits = Number(tenantRow.CreditsLeft || 0);
+    // =============================================
+    // SUBSCRIPTION VALIDATION
+    // =============================================
+
+    const subscriptionStatus = tenantRow.SubscriptionStatus || "Expired";
+
+    const subscriptionExpiryDate = tenantRow.SubscriptionExpiryDate
+      ? new Date(tenantRow.SubscriptionExpiryDate)
+      : null;
+
+    const today = new Date();
+
+    today.setHours(0, 0, 0, 0);
+
+    if (subscriptionExpiryDate) {
+      subscriptionExpiryDate.setHours(0, 0, 0, 0);
+    }
+
+    if (
+      subscriptionStatus !== "Active" ||
+      !subscriptionExpiryDate ||
+      subscriptionExpiryDate < today
+    ) {
+      res.statusCode = 403;
+
+      res.setHeader("Content-Type", "application/json");
+
+      return res.end(
+        JSON.stringify({
+          success: false,
+          error: "subscription_expired",
+          message:
+            "Your HtAG subscription has expired. Please renew your subscription.",
+        })
+      );
+    }
 
     const MIN_REQUIRED_CREDITS = 20;
 
@@ -162,21 +312,19 @@
       return;
     }
 
-    // =============================================
-    // EXECUTION TIMER + BILLING TRACKING
-    // =============================================
-
-    startTime = Date.now();
-
     // ============================================
     // GET ADDRESS FROM QUERY PARAMS
     // ============================================
 
-    const url = new URL(req.url, "http://localhost");
+    const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
+
     const address = url.searchParams.get("address");
     const existingAddressKey = url.searchParams.get("address_key");
+    const priceRange = url.searchParams.get("priceRange") || "";
+    const bedrooms = url.searchParams.get("bedrooms") || "";
+    const bathrooms = url.searchParams.get("bathrooms") || "";
     const limit = Number(url.searchParams.get("limit")) || 5;
-    const radius = Number(url.searchParams.get("radius")) || 2;
+    const radius = Math.min(Number(url.searchParams.get("radius")) || 2, 5);
 
     if (!address) {
       res.writeHead(400, {
@@ -240,14 +388,9 @@
           body: JSON.stringify({
             addresses: [address],
           }),
-=======
-        @page {
-            size: A4 portrait;
-            margin: 0;
->>>>>>> 85cccbc (feat: integrate dynamic CRM fields and fix PDF page-break top margins)
         }
+      );
 
-<<<<<<< HEAD
       const standardiseData = await standardiseResponse.json();
 
       // ============================================
@@ -341,14 +484,67 @@
     // STEP 2 - SOLD SEARCH USING ADDRESS KEY
     // ============================================
 
-    const soldSearchUrl =
+    let soldSearchUrl =
       `https://api.htagai.com/v1/property/sold/search?` +
       `address_key=${encodeURIComponent(addressKey)}` +
-      `&radius_km=${radius}` +
+      `&radius=${radius * 1000}` +
       `&proximity=any` +
       `&limit=${limit}`;
 
-    // console.log("HTAG SOLD SEARCH URL:", soldSearchUrl);
+    // ============================================
+    // PRICE RANGE FILTER
+    // ============================================
+
+    if (priceRange) {
+      const [minPrice, maxPrice] = priceRange.split("-").map(Number);
+
+      if (!isNaN(minPrice) && !isNaN(maxPrice)) {
+        if (minPrice > 0) {
+          soldSearchUrl += `&saleValueMin=${minPrice}`;
+        }
+
+        if (maxPrice < 999999999) {
+          soldSearchUrl += `&saleValueMax=${maxPrice}`;
+        }
+      }
+    }
+    // ============================================
+    // BEDROOM FILTER
+    // ============================================
+
+    if (bedrooms) {
+      const bedroomCount = Number(bedrooms);
+
+      if (Number.isInteger(bedroomCount) && bedroomCount > 0) {
+        soldSearchUrl += `&bedrooms_min=${bedroomCount}`;
+        soldSearchUrl += `&bedrooms_max=${bedroomCount}`;
+      }
+    }
+
+    // ============================================
+    // BATHROOM FILTER
+    // ============================================
+
+    if (bathrooms) {
+      const bathroomCount = Number(bathrooms);
+
+      if (Number.isInteger(bathroomCount) && bathroomCount > 0) {
+        soldSearchUrl += `&bathrooms_min=${bathroomCount}`;
+        soldSearchUrl += `&bathrooms_max=${bathroomCount}`;
+      }
+    }
+    console.log("============================================");
+    console.log("HTAG SOLD SEARCH REQUEST");
+    console.log("============================================");
+    console.log("ADDRESS:", address);
+    console.log("ADDRESS KEY:", addressKey);
+    console.log("PRICE RANGE:", priceRange || "All Prices");
+    console.log("BEDROOMS:", bedrooms || "Any");
+    console.log("BATHROOMS:", bathrooms || "Any");
+    console.log("RADIUS:", radius, "km");
+    console.log("RESULT LIMIT:", limit);
+    console.log("HTAG SOLD SEARCH URL:", soldSearchUrl);
+    console.log("============================================");
 
     const soldResponse = await fetch(soldSearchUrl, {
       method: "GET",
@@ -362,6 +558,15 @@
     // console.log("REQUEST ID:", requestId);
 
     const soldData = await soldResponse.json();
+
+    console.log("============================================");
+    console.log("HTAG SOLD SEARCH RESPONSE");
+    console.log("STATUS:", soldResponse.status);
+    console.log("OK:", soldResponse.ok);
+    console.log("TOTAL RESULTS:", soldData?.total || 0);
+    console.log("RETURNED RESULTS:", soldData?.results?.length || 0);
+    console.log("HTAG RESPONSE:", JSON.stringify(soldData, null, 2));
+    console.log("============================================");
 
     // ============================================
     // BILLING TRACKING
@@ -407,7 +612,10 @@
 
           Last_Credits_Consumed: 0,
 
-          LastCreditUsageDate: "",
+          LastCreditUsageDate: new Date()
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " "),
         });
 
         creditRow = newCreditRow;
@@ -460,7 +668,10 @@
         CreditsRemaining: newBalance,
         Total_Credits_Purchased: totalCreditsPurchased,
         Last_Credits_Consumed: totalBillingUnits,
-        LastCreditUsageDate: new Date().toISOString().split("T")[0],
+        LastCreditUsageDate: new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace("T", " "),
       });
 
       // console.log("UPDATING CREDITS BALANCE =>", {
@@ -482,212 +693,124 @@
           tenantCreditStatus = "Low Credits";
         } else {
           tenantCreditStatus = "Active";
-=======
-        body {
-            background: #fff;
-            color: #222;
-            margin: 0;
-            padding: 0;
-            -webkit-print-color-adjust: exact;
-            print-color-adjust: exact;
->>>>>>> 85cccbc (feat: integrate dynamic CRM fields and fix PDF page-break top margins)
         }
+      }
 
-        /* Fixed Standard Page Container (for structured static pages) */
-        .page {
-            width: 100%;
-            height: 297mm; /* Absolute standard A4 page height */
-            max-height: 297mm;
-            padding: 20mm 20mm; /* Generous, standard PDF safe zone margins */
-            position: relative;
-            box-sizing: border-box;
-            overflow: hidden; /* Prevents stray elements from spilling onto next page */
-        }
+      if (tenantRow && tenantRow.ROWID) {
+        await zcql.executeZCQLQuery(
+          `UPDATE apiTenants
+SET CreditsLeft=${newBalance},
+    CreditStatus='${tenantCreditStatus}',
+    LastTopUpDate='${
+      latestPayment ? latestPayment.LastTopupDate : tenantRow.LastTopUpDate
+    }',
+    SubscriptionPlan='${
+      latestPayment
+        ? latestPayment.SubscriptionPlan
+        : tenantRow.SubscriptionPlan
+    }',
+    SubscriptionStatus='${
+      latestPayment
+        ? latestPayment.SubscriptionStatus
+        : tenantRow.SubscriptionStatus
+    }',
+    SubscriptionExpiryDate='${
+      latestPayment
+        ? latestPayment.SubscriptionExpiryDate
+        : tenantRow.SubscriptionExpiryDate
+    }'
+           WHERE ROWID='${tenantRow.ROWID}'`
+        );
+      }
 
-        /* Dynamic Page Container (specifically for the dynamic comparable rows list) */
-        .dynamic-page {
-            width: 100%;
-            padding: 20mm 20mm;
-            position: relative;
-            box-sizing: border-box;
-        }
+      // console.log("API TENANT UPDATED:", newBalance, tenantCreditStatus);
+    } catch (tenantUpdateError) {
+      console.error("API TENANT UPDATE ERROR:", tenantUpdateError);
+    }
 
-        .cover-page {
-            padding-top: 25mm;
-        }
+    // console.log("API TENANT CREDITS UPDATED:", newBalance);
 
-        .summary-page,
-        .comparable-page,
-        .estimation-page,
-        .disclaimer-page {
-            padding-top: 20mm;
-        }
+    // ============================================
+    // HTAG CONSUMPTION LOG
+    // ============================================
 
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            padding-bottom: 25px;
-            margin-bottom: 25px;
-            border: none;
-        }
+    try {
+      // console.log("ENTERING HTAG CONSUMPTION LOG BLOCK");
 
-        .left {
-            width: 70%;
-        }
+      const insertedRow = await htagConsumptionTable.insertRow({
+        ModuleName: "Acquisition",
 
-        .right {
-            width: 25%;
-            display: flex;
-            justify-content: flex-end;
-        }
+        RequestId: requestId,
 
-        .logo {
-            width: 180px;
-            display: flex;
-            justify-content: flex-end;
-            align-items: flex-start;
-        }
+        WidgetName: "Comparable Sales",
 
-        .cover-image {
-            width: 100%;
-            height: 540px;
-            margin-top: 25px;
-        }
+        OrgID: orgId,
 
-        .cover-image img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            border-radius: 8px;
-            border: none;
-        }
+        APIUnitsConsumed: totalBillingUnits,
 
-        .title {
-            font-size: 20px;
-            font-weight: 500;
-            color: #505050;
-            margin-top: 14px;
-            margin-bottom: 18px;
-        }
+        APICost: totalBillingCost,
 
-        .address {
-            font-size: 18px;
-            color: #555;
-            margin-bottom: 25px;
-        }
+        FunctionName: "getComparableSales",
 
-        .meta {
-            font-size: 11px;
-            line-height: 22px;
-            color: #666;
-        }
+        ExecutionDateTime: new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace("T", " "),
 
-        .section {
-            margin-top: 20px;
-        }
+        RecordID: req.headers["x-record-id"] || "",
+        CreditCostBreakdown: usageBreakdown.join("\n"),
+      });
 
-        .section-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: #1a1a1a;
-            border-bottom: 1.5px solid #f0f0f0;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-            letter-spacing: -0.2px;
-        }
+      // console.log("HTAG INSERT RESULT:", JSON.stringify(insertedRow, null, 2));
+    } catch (htagLogError) {
+      console.error(
+        "HTAG CONSUMPTION LOG ERROR:",
+        JSON.stringify(htagLogError, null, 2)
+      );
+    }
 
-        .sales-list {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
+    // ============================================
+    // Inserting Log To Data Storage
+    // ============================================
 
-        /* Premium Summary Cards Styling */
-        .summary-container {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 15px;
-            width: 100%;
-            margin-top: 20px;
-        }
+    try {
+      await usageTable.insertRow({
+        Org_ID: req.headers["x-org-id"] || "Unknown Org",
 
-        .summary-card-hero {
-            width: 100%;
-            height: 240px;
-            background-size: cover;
-            background-position: center;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-            margin-bottom: 20px;
-        }
+        CRM_User: req.headers["x-crm-user"] || "Unknown User",
 
-        .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 15px;
-            width: 100%;
-        }
+        Function_Name: "getComparableSales",
 
-        .summary-card {
-            background: #F8F9FA;
-            border: 1px solid #E9ECEF;
-            border-radius: 6px;
-            padding: 16px;
-            text-align: left;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-        }
+        Feature_Name: "Comparable Sales",
 
-        .summary-card-label {
-            font-size: 11px;
-            color: #787B7E;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 6px;
-        }
+        Record_ID: req.headers["x-record-id"] || "Unknown Record",
 
-        .summary-card-value {
-            font-size: 18px;
-            color: #38424A;
-            font-weight: 600;
-        }
+        Execution_Time_MS: Date.now() - startTime,
 
-        .card {
-            border: 1px solid #e5e5e5;
-            border-radius: 8px;
-            padding: 15px;
-            background: #fafafa;
-        }
+        Status: soldResponse.ok ? "success" : "error",
 
-        .card-title {
-            font-size: 12px;
-            color: #777;
-            margin-bottom: 8px;
-        }
+        API_Consumption: totalBillingUnits,
 
-        .card-value {
-            font-size: 20px;
-            font-weight: 700;
-        }
+        Usage_Response: usageBreakdown.join("\n"),
+      });
+    } catch (loggingError) {
+      console.error("LOGGING ERROR:", loggingError);
+    }
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
+    // console.log(
+    //   "HTAG SOLD SEARCH RESPONSE:",
+    //   JSON.stringify(soldData, null, 2)
+    // );
 
-        thead {
-            background: #f5f5f5;
-        }
+    // ============================================
+    // HANDLE CREDIT LIMIT
+    // ============================================
 
-        th {
-            text-align: left;
-            padding: 12px;
-            border: 1px solid #e5e5e5;
-            font-size: 13px;
-        }
+    if (soldResponse.status === 402) {
+      res.writeHead(402, {
+        "Content-Type": "application/json",
+      });
 
-<<<<<<< HEAD
       res.end(
         JSON.stringify({
           error: "payment_required",
@@ -695,447 +818,118 @@
             "Oops! API credits exhausted. Please contact support@agenttime.au",
         })
       );
-=======
-        td {
-            padding: 12px;
-            border: 1px solid #e5e5e5;
-            font-size: 13px;
-        }
->>>>>>> 85cccbc (feat: integrate dynamic CRM fields and fix PDF page-break top margins)
 
-        .footer {
-            margin-top: 40px;
-            border-top: 1px solid #ececec;
-            padding-top: 18px;
-            text-align: center;
-            font-size: 11px;
-            color: #777;
-            page-break-inside: avoid;
-            break-inside: avoid;
-        }
+      return;
+    }
 
-        .disclaimer {
-            font-size: 12px;
-            line-height: 1.8;
-            color: #666;
-        }
+    // ============================================
+    // HANDLE NO RESULTS
+    // ============================================
 
-        .disclaimer-section {
-            page-break-inside: avoid;
-            break-inside: avoid;
-        }
+    if (!soldData.results || soldData.results.length === 0) {
+      res.writeHead(404, {
+        "Content-Type": "application/json",
+      });
 
-        .property-hero {
-            display: flex;
-            gap: 35px;
-            margin-top: 20px;
-            margin-bottom: 25px;
-            align-items: flex-start;
-        }
+      res.end(
+        JSON.stringify({
+          error: "no_results",
+          message: `No comparable sales found for ${address} try again later`,
+          searched_address: address,
+          address_key: addressKey,
+          htag_response: soldData,
+        })
+      );
 
-        .hero-image {
-            width: 260px;
-            flex-shrink: 0;
-        }
+      return;
+    }
 
-        .hero-image img {
-            width: 100%;
-            border-radius: 12px;
-            border: 1px solid #e8e8e8;
-            background: white;
-            padding: 10px;
-        }
+    // ============================================
+    // SUCCESS RESPONSE
+    // ============================================
 
-        .hero-details {
-            flex: 1;
-        }
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+    });
 
-        .property-icons {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            margin-bottom: 20px;
-            width: 100%;
-        }
+    res.end(
+      JSON.stringify({
+        success: true,
+        credit_data: {
+          available_credits: newBalance,
+          last_credits_consumed: totalBillingUnits,
+          credit_status: tenantCreditStatus,
+          last_topup: lastTopup,
+          last_topup_date: lastTopupDate,
+          total_credits_purchased: totalCreditsPurchased,
 
-        .icon-card {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 12px 14px;
-            background: #f8f9fa;
-            border: 1px solid #eef0f2;
-            border-radius: 8px;
-        }
+          subscription_plan: tenantRow.SubscriptionPlan,
+          subscription_status: tenantRow.SubscriptionStatus,
+          subscription_expiry_date: tenantRow.SubscriptionExpiryDate,
+        },
+        input_address: address,
+        address_key: addressKey,
+        total_results: soldData.total || 0,
+        comparable_sales: soldData.results.map((item) => ({
+          street_address: item.street_address || "",
 
-        .icon-card img {
-            width: 20px;
-            height: 20px;
-        }
+          suburb: item.suburb || "",
 
-        .icon-card span {
-            font-size: 12px;
-            font-weight: 600;
-            color: #333;
-        }
+          sold_price: item.sold_price || "N/A",
 
-        .property-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
+          sold_date: item.sold_date || "",
 
-        .property-table td {
-            padding: 10px 12px;
-            border-bottom: 1px solid #f0f0f0;
-            font-size: 13px;
-            color: #444;
-        }
+          bedrooms: item.bedrooms || 0,
 
-        .property-table tr:hover td {
-            background: #fafafa;
-        }
+          bathrooms: item.bathrooms || 0,
 
-        .property-table td:first-child {
-            width: 160px;
-            color: #777;
-            font-weight: 500;
-        }
+          car_spaces: item.car_spaces || 0,
 
-        .sale-card {
-            display: flex;
-            gap: 24px;
-            border: 1px solid #eef0f2;
-            border-radius: 12px;
-            padding: 20px;
-            background: white;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.02);
-            margin-bottom: 20px;
-            page-break-inside: avoid;
-            break-inside: avoid;
-        }
+          land_area: item.land_area || 0,
 
-        .sale-image {
-            width: 170px;
-            flex-shrink: 0;
-        }
+          property_type: item.property_type || "",
+        })),
+      })
+    );
+  } catch (error) {
+    try {
+      await usageTable.insertRow({
+        Org_ID: req.headers["x-org-id"] || "Unknown Org",
 
-        .sale-image img {
-            width: 100%;
-            height: 130px;
-            object-fit: contain;
-            border-radius: 10px;
-            border: 1px solid #ececec;
-            padding: 12px;
-            background: white;
-        }
+        CRM_User: req.headers["x-crm-user"] || "Unknown User",
 
-        .sale-content {
-            flex: 1;
-        }
+        Function_Name: "getComparableSales",
 
-        .sale-address {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: #1a1a1a;
-        }
+        Feature_Name: "Comparable Sales",
 
-        .sale-icons {
-            display: flex;
-            gap: 20px;
-            margin-bottom: 16px;
-            flex-wrap: wrap;
-        }
+        Record_ID: req.headers["x-record-id"] || "Unknown Record",
 
-        .sale-icons div {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            font-weight: 600;
-            color: #444;
-        }
+        Execution_Time_MS: Date.now() - startTime,
 
-        .sale-icons img {
-            width: 16px;
-            height: 16px;
-        }
+        Status: "failed",
 
-        .sale-footer {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-top: 15px;
-            padding-top: 15px;
-            border-top: 1px solid #ececec;
-        }
+        API_Consumption: totalBillingUnits || 0,
 
-        .sale-date {
-            font-size: 13px;
-            color: #777;
-        }
+        Usage_Response:
+          (usageBreakdown || []).join("\n") +
+          "\nERROR: " +
+          (error.message || "Unknown Error"),
+      });
+    } catch (loggingError) {
+      console.error("FAILURE LOGGING ERROR:", loggingError);
+    }
 
-        .sale-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-        }
+    console.error("SERVER ERROR:", error);
 
-        .sale-type {
-            font-size: 11px;
-            font-weight: 600;
-            color: #777;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
+    res.writeHead(500, {
+      "Content-Type": "application/json",
+    });
 
-        .sale-price {
-            font-size: 26px;
-            font-weight: 700;
-            color: #111;
-        }
-
-        /* Valuation Box specific styling */
-        .estimation-box {
-            background: #FAFAFA;
-            border-left: 4px solid #38424A;
-            padding: 25px;
-            margin-top: 20px;
-            border-radius: 4px;
-        }
-
-        .estimation-label {
-            font-size: 11px;
-            color: #787B7E;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            font-weight: 500;
-            display: block;
-            margin-bottom: 6px;
-        }
-
-        .estimation-value {
-            font-size: 28px;
-            margin: 10px 0;
-            color: #38424A;
-            font-weight: 700;
-        }
-
-        .estimation-text {
-            font-size: 13px;
-            line-height: 1.6;
-            color: #4D4D4F;
-            margin-top: 12px;
-        }
-
-        .insights-list {
-            margin-top: 30px;
-        }
-
-        .insights-list h4 {
-            font-size: 15px;
-            color: #38424A;
-            margin-bottom: 12px;
-            font-weight: 600;
-        }
-
-        .insights-list ul {
-            color: #4D4D4F;
-            line-height: 1.7;
-            padding-left: 20px;
-            font-size: 13px;
-        }
-
-        .insights-list li {
-            margin-bottom: 8px;
-        }
-
-        .report-footer {
-            page-break-inside: avoid;
-            break-inside: avoid;
-            position: absolute;
-            bottom: 20mm;
-            left: 20mm;
-            right: 20mm;
-        }
-
-        .page-break {
-            page-break-after: always;
-            break-after: page;
-        }
-    </style>
-</head>
-
-<body>
-
-    <!-- ========================= -->
-    <!-- PAGE 1: COVER PAGE -->
-    <!-- ========================= -->
-    <div class="page cover-page">
-        <div class="header">
-            <div class="left">
-                <div style="font-size:14px; font-weight:700; color:#333; margin-bottom:12px; text-transform: uppercase; letter-spacing: 0.5px;">
-                    Comparative Market Analysis Report
-                </div>
-                <div class="title" style="font-size: 24px; font-weight: 700; color: #1a1a1a; line-height: 1.25; margin-top: 10px; margin-bottom: 20px;">
-                    {{PROPERTY_ADDRESS}}
-                </div>
-                <div class="meta" style="margin-top: 20px;">
-                    <table style="width: auto; border-collapse: collapse; font-size: 12px; margin-top: 0;">
-                        <tr>
-                            <td style="border: none; padding: 4px 30px 4px 0; color: #777; font-weight: 500;">
-                                Prepared On
-                            </td>
-                            <td style="border: none; padding: 4px 0; color: #222; font-weight: 600;">
-                                {{GENERATED_DATE}}
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="border: none; padding: 4px 30px 4px 0; color: #777; font-weight: 500;">
-                                Prepared By
-                            </td>
-                            <td style="border: none; padding: 4px 0; color: #222; font-weight: 600;">
-                                {{GENERATED_BY}}
-                            </td>
-                        </tr>
-                        <tr>
-                            <td style="border: none; padding: 4px 30px 4px 0; color: #777; font-weight: 500;">
-                                Generated Using
-                            </td>
-                            <td style="border: none; padding: 4px 0; color: #222; font-weight: 600;">
-                                Agent Time Buyers Agency Suite
-                            </td>
-                        </tr>
-                    </table>
-                </div>
-            </div>
-            <div class="right">
-                <div class="logo">
-                    <img src="assets/htag-logo.png" style="width:95px; height: auto;">
-                </div>
-            </div>
-        </div>
-        <div class="cover-image">
-            <img src="assets/property-placeholder.png" alt="Property Cover Image">
-        </div>
-    </div>
-
-    <div class="page-break"></div>
-
-    <!-- ========================= -->
-    <!-- PAGE 2: SUMMARY PAGE -->
-    <!-- ========================= -->
-    <div class="page summary-page">
-        <div class="section">
-            <div class="section-title">Property Summary</div>
-            <div class="property-hero">
-                <div class="hero-image">
-                    <img src="assets/property-placeholder.png" alt="Property Thumbnail">
-                </div>
-                <div class="hero-details">
-                    <div class="property-icons">
-                        <div class="icon-card">
-                            <img src="assets/bed.png" alt="Bed Icon">
-                            <span>{{BEDROOMS}} Bedrooms</span>
-                        </div>
-                        <div class="icon-card">
-                            <img src="assets/bath.png" alt="Bath Icon">
-                            <span>{{BATHROOMS}} Bathrooms</span>
-                        </div>
-                        <div class="icon-card">
-                            <img src="assets/car.png" alt="Car Icon">
-                            <span>{{CAR_SPACES}} Car Spaces</span>
-                        </div>
-                        <div class="icon-card">
-                            <img src="assets/land.png" alt="Land Icon">
-                            <span>{{LAND_SIZE}} Sqm</span>
-                        </div>
-                    </div>
-                    <table class="property-table">
-                        <tr>
-                            <td>Property Type</td>
-                            <td>{{PROPERTY_TYPE}}</td>
-                        </tr>
-                        <tr>
-                            <td>Year Built</td>
-                            <td>{{YEAR_BUILT}}</td>
-                        </tr>
-                        <tr>
-                            <td>Zone</td>
-                            <td>{{ZONE}}</td>
-                        </tr>
-                        <tr>
-                            <td>Radius Used</td>
-                            <td>{{RADIUS}}</td>
-                        </tr>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="page-break"></div>
-
-    <!-- ========================= -->
-    <!-- PAGE 3: RECENTLY SOLD PROPERTIES (DYNAMIC FLOW CONTAINER) -->
-    <!-- ========================= -->
-    <div class="dynamic-page comparable-page">
-        <div class="section">
-            <div class="section-title">Recently Sold Properties</div>
-            <div class="sales-list">
-                {{COMPARABLE_ROWS}}
-            </div>
-        </div>
-    </div>
-
-    <div class="page-break"></div>
-
-    <!-- ========================= -->
-    <!-- PAGE 4: ESTIMATED PROPERTY VALUE -->
-    <!-- ========================= -->
-    <div class="page estimation-page">
-        <div class="section">
-            <div class="section-title">Estimated Property Value</div>
-            
-            <div class="estimation-box">
-                <span class="estimation-label">Estimated Price Range</span>
-                <div class="estimation-value">{{MIN_ESTIMATED_VALUE}} - {{MAX_ESTIMATED_VALUE}}</div>
-                <p class="estimation-text">
-                    This automated estimated value represents our localized pricing analysis compiled using recent surrounding sales indices, historical trends, property configuration weighting, and general market velocity within the area.
-                </p>
-            </div>
-
-            <div class="insights-list">
-                <h4>Key Pricing Insights</h4>
-                <ul>
-                    <li>Calculated based on local transactions of similar scale, configuration, and structural layout within your chosen search radius.</li>
-                    <li>Value index considers specific zoning variances, dynamic land-to-building ratios, and active buyer interest parameters across our platform database.</li>
-                </ul>
-            </div>
-        </div>
-    </div>
-
-    <div class="page-break"></div>
-
-    <!-- ========================= -->
-    <!-- FINAL PAGE: DISCLAIMER & FOOTER -->
-    <!-- ========================= -->
-    <div class="page disclaimer-page">
-        <div class="report-footer">
-            <div class="section disclaimer-section">
-                <div class="section-title">Disclaimer</div>
-                <div class="disclaimer">
-                    This report has been generated using property data supplied by HTAG and information available within Agent Time Buyers Agency Suite. The information contained in this report is intended as a guide only and should not be relied upon as an independent valuation or legal advice. Users should undertake their own due diligence and seek professional advice before making any property or financial decisions.
-                </div>
-            </div>
-            <div class="footer">
-                Powered by <strong>Agent Time Buyers Agency Suite</strong> • Property Data by <strong>HTAG</strong>
-            </div>
-        </div>
-    </div>
-
-</body>
-
-</html>
+    res.end(
+      JSON.stringify({
+        error: "server_error",
+        message: error.message,
+      })
+    );
+  }
+};

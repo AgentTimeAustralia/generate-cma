@@ -126,7 +126,7 @@
         }
 
         .property-headline-address {
-            font-size: 24px;
+            font-size: 20px;
             font-weight: 600;
             color: #1a1a1a;
             max-width: 55%;
@@ -334,6 +334,38 @@
             margin: 14px 0;
         }
 
+        .market-range {
+    display: flex;
+    gap: 20px;
+    margin-top: 25px;
+    margin-bottom: 35px;
+}
+
+.market-range-box {
+    flex: 1;
+    border: 1px solid #ECECEC;
+    border-radius: 12px;
+    padding: 22px;
+    text-align: center;
+    background: #FFFFFF;
+}
+
+.market-range-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: #787B7E;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    margin-bottom: 10px;
+}
+
+.market-range-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: #38424A;
+}
+
         .estimation-text {
             margin-top: 20px;
             font-size: 14px;
@@ -395,7 +427,7 @@
           <div style="font-size: 15px; font-weight: 600; color: #787b7e; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 18px;">
             Comparative Market Analysis Report
           </div>
-          <div class="title" style="font-size: 30px; font-weight: 700; line-height: 1.2; color: #1a1a1a; margin: 0 0 28px;">
+          <div class="title" style="font-size: 20px; font-weight: 700; line-height: 1.2; color: #1a1a1a; margin: 0 0 28px;">
             {{PROPERTY_ADDRESS}}
           </div>
           <div class="meta" style="margin-top: 20px">
@@ -632,6 +664,24 @@
             trends, property configuration weighting, and general market
             velocity within the area.
           </p>
+        </div>
+
+        <div class="market-range">
+
+            <div class="market-range-box">
+                <span class="market-range-label">Market Floor</span>
+                <div class="market-range-value">
+                    {{MARKET_FLOOR}}
+                </div>
+            </div>
+        
+            <div class="market-range-box">
+                <span class="market-range-label">Market Ceiling</span>
+                <div class="market-range-value">
+                    {{MARKET_CEILING}}
+                </div>
+            </div>
+        
         </div>
 
         <div class="insights-list">
